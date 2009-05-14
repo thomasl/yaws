@@ -72,6 +72,12 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The body/3 method is invoked by yaws_server to complete an upload
 %% (or reject it).
+%%
+%% UNFINISHED
+%% - check that Content-Range is not present
+%% - map URL to storage with external module (config'd per server)
+%% - currently writes to target file directly rather than upload+move
+%% - measure size of process
 
 body(CliSock, Req, Head) ->
     ?dbg("... body_method ...\n", []),
@@ -86,7 +92,8 @@ body(CliSock, Req, Head) ->
     %% open tempfile as FD
     %% if upload fails, delete tempfile
     %% when upload completes, move tempfile to destfile 
-    File = file_of_url(Req),
+    DocRoot = SC#sconf.docroot,
+    File = file_of_url(DocRoot, Req),
     {ok, FD} = file:open(File, [append, raw, delayed_write]),
     try 
 	case respond_to_100(CliSock, Head) of
@@ -106,22 +113,17 @@ body(CliSock, Req, Head) ->
 				exit(nyi)
 			end;
 		    Len_lst ->
-			case (catch list_to_integer(Len_lst)) of
-			    {'EXIT', Rsn} ->
-				?dbg("Bad length: ~p\n", [Len_lst]),
-				exit(nyi);
-			    Len ->
-				?dbg("content-length: ~p\n", [Len]),
-				SegLen = upload_segment_length(PPS),
-				upload_body_length(
-				  CliSock, FD, Len, SegLen, SSL
-				 )
-			end
+			Len = list_to_integer(Len_lst),
+			?dbg("content-length: ~p\n", [Len]),
+			SegLen = upload_segment_length(PPS),
+			upload_body_length(
+			  CliSock, FD, Len, SegLen, SSL
+			 )
 		end;
-	    {error, Rsn} ->
+	    Err ->
 		%% final response has been sent, done
-		?dbg("error respond_to_100: ~p\n", [Rsn]),
-		exit({nyi, Rsn})
+		?dbg("error respond_to_100: ~p\n", [Err]),
+		exit({nyi, Err})
 	end
     after
 	file:close(FD)
@@ -147,11 +149,15 @@ upload_segment_length(X) ->
 %% - e.g., use docroot ++ path for abspath
 %%   or a "map to storage handler"
 
-file_of_url(Req) ->
-    Path = Req#http_request.path,
-    Tempfile = "/home/thomasl/foo",
-    ?dbg("Path = ~p, temp = ~p\n", [Path, Tempfile]),
-    Tempfile.
+file_of_url(DocRoot, Req) ->
+    case Req#http_request.path of
+	{abs_path, Path} ->
+	    Tempfile = DocRoot ++ Path,
+	    ?dbg("Path = ~p, temp = ~p\n", [Path, Tempfile]),
+	    Tempfile;
+	Err ->
+	    ?dbg("UNFINISHED - Unable to map ~p\n", [Err])
+    end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% All uploads are run as loops, reading at most a limited number of
