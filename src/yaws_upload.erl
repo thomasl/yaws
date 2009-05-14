@@ -59,6 +59,14 @@
 -define(elog(X,Y), error_logger:info_msg("*elog ~p:~p: " X,
                                          [?MODULE, ?LINE | Y])).
 
+%% UNFINISHED
+%% - should map to a proper logger in time
+%% - something else uses dbg/2, but not useful
+-undef(dbg).
+-define(dbg(Str, Xs), io:format("~p:~p: " Str, [?MODULE, ?LINE |Xs])).
+
+%% UNFINISHED
+%% - default settable some better way?
 -define(read_segment_len, 8192).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -66,82 +74,71 @@
 %% (or reject it).
 
 body(CliSock, Req, Head) ->
-    io:format("... body_method ...\n", []),
+    ?dbg("... body_method ...\n", []),
     SC = get(sc),
     SSL = yaws:is_ssl(SC),
     ok = yaws:setopts(CliSock, [{packet, raw}, binary], SSL),
     PPS = SC#sconf.partial_post_size,
-    io:format("... content-length = ~p, te = ~p\n", 
+    ?dbg("... content-length = ~p, te = ~p\n", 
 	      [Head#headers.content_length, 
 	       Head#headers.transfer_encoding]),
-    io:format("Headers: ~p\n", [Head]),
+    ?dbg("Headers: ~p\n", [Head]),
     %% open tempfile as FD
     %% if upload fails, delete tempfile
     %% when upload completes, move tempfile to destfile 
     File = file_of_url(Req),
     {ok, FD} = file:open(File, [append, raw, delayed_write]),
-    case respond_to_100(CliSock, Head) of
-	ok ->
-	    case Head#headers.content_length of
-		undefined ->
-		    case Head#headers.transfer_encoding of
-			"chunked" ->
-			    %% transfer in chunks	
-			    io:format("chunked transfer\n", []),
-			    case PPS of
-				nolimit ->
-				    %% read chunk at a time
-				    io:format("PPS: nolimit\n", []),
-				    SegLen = ?read_segment_len,
-				    upload_chunks(CliSock, FD, SegLen, SSL);
-				SegLen when integer(SegLen), SegLen > 0 ->
-				    %% read chunks,
-				    %% read parts of chunk in loop
-				    io:format("PPS: ~p\n", [SegLen]),
-				    upload_chunks(CliSock, FD, SegLen, SSL);
-				_ ->
-				    %% unknown config, die
-				    io:format("PPS bad: ~p\n", [PPS]),
-				    exit(nyi)
-			    end;
-			_ ->
-			    %% unknown transfer method, die
-			    io:format("", []),
-			    exit(nyi)
-		    end;
-		Len_lst ->
-		    case (catch list_to_integer(Len_lst)) of
-			{'EXIT', Rsn} ->
-			    io:format("Bad length: ~p\n", [Len_lst]),
-			    exit(nyi);
-			Len ->
-			    io:format("content-length: ~p\n", [Len]),
-			    case PPS of
-				nolimit ->
-				    %% read entity-body at once
-				    io:format("PPS-size: nolimit\n", []),
-				    SegLen = ?read_segment_len,
-				    upload_body_length(
-				      CliSock, FD, Len, SegLen, SSL
-				     );
-				SegLen when integer(SegLen), SegLen > 0 ->
-				    %% read parts in loop 
-				    io:format("PPS-size ~p\n", [SegLen]),
-				    upload_body_length(
-				      CliSock, FD, Len, SegLen, SSL
-				     );
-				_ ->
-				    %% unknown config
-				    io:format("unknown post-size: ~p\n", [PPS]),
-				    exit(nyi)
-			    end
-		    end
-	    end;
-	{error, Rsn} ->
-	    %% final response has been sent, done
-	    io:format("respond_to_100: ~p\n", [Rsn]),
-	    exit({nyi, Rsn})
+    try 
+	case respond_to_100(CliSock, Head) of
+	    ok ->
+		case Head#headers.content_length of
+		    undefined ->
+			case Head#headers.transfer_encoding of
+			    "chunked" ->
+				%% transfer in chunks	
+				?dbg("chunked transfer\n", []),
+				SegLen = upload_segment_length(PPS),
+				upload_chunks(CliSock, FD, SegLen, SSL);
+			    Enc ->
+				?dbg("Unknown transfer-encoding: ~p\n", 
+				     [Enc]),
+				%% return an error
+				exit(nyi)
+			end;
+		    Len_lst ->
+			case (catch list_to_integer(Len_lst)) of
+			    {'EXIT', Rsn} ->
+				?dbg("Bad length: ~p\n", [Len_lst]),
+				exit(nyi);
+			    Len ->
+				?dbg("content-length: ~p\n", [Len]),
+				SegLen = upload_segment_length(PPS),
+				upload_body_length(
+				  CliSock, FD, Len, SegLen, SSL
+				 )
+			end
+		end;
+	    {error, Rsn} ->
+		%% final response has been sent, done
+		?dbg("error respond_to_100: ~p\n", [Rsn]),
+		exit({nyi, Rsn})
+	end
+    after
+	file:close(FD)
     end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%% The segment length is the size of each chunk read from the socket
+%% (not to be confused with chunked encoding). This is defined by the
+%% partial_post_size parameter if available, otherwise set to a "sensible
+%% default".
+
+upload_segment_length(nolimit) ->
+    ?read_segment_len;
+upload_segment_length(N) when integer(N), N > 0 ->
+    N;
+upload_segment_length(X) ->
+    exit({unknown_post_size_value, X}).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
@@ -153,7 +150,7 @@ body(CliSock, Req, Head) ->
 file_of_url(Req) ->
     Path = Req#http_request.path,
     Tempfile = "/home/thomasl/foo",
-    io:format("Path = ~p, temp = ~p\n", [Path, Tempfile]),
+    ?dbg("Path = ~p, temp = ~p\n", [Path, Tempfile]),
     Tempfile.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -171,7 +168,7 @@ upload_body_length(CliSock, FD, Len, SegLen, SSL) ->
 
 upload_loop(CliSock, FD, Len, SegLen, SSL) when Len > 0 ->
     ReadLen = min(Len, SegLen),
-    io:format("wait for ~p bytes ...\n", [ReadLen]),
+    ?dbg("wait for ~p bytes ...\n", [ReadLen]),
     % case yaws:do_recv(CliSock, SegLen, SSL) of
     Read_timeout = 3000,
     case gen_tcp:recv(CliSock, ReadLen, Read_timeout) of
@@ -182,7 +179,7 @@ upload_loop(CliSock, FD, Len, SegLen, SSL) when Len > 0 ->
 	    exit(normal)
     end;
 upload_loop(_CliSock, _FD, 0, _SegLen, _SSL) ->
-    io:format("upload done\n", []),
+    ?dbg("upload done\n", []),
     done.
 
 min(X, Y) ->
@@ -214,34 +211,40 @@ upload_body_all(CliSock, FD, SegLen, SSL) ->
 
 upload_chunks(CliSock, FD, SegLen, SSL) ->
     case upload_chunk(CliSock, FD, SegLen, SSL) of
-	done ->
+	final_chunk ->
 	    done;
-	ok ->
+	interim_chunk_done ->
 	    upload_chunks(CliSock, FD, SegLen, SSL)
     end.
 
 upload_chunk(CliSock, FD, SegLen, SSL) ->
     yaws:setopts(CliSock, [list, {packet, line}], SSL),
     N = get_chunk_length(CliSock, SSL),
+    ?dbg("Chunk length: ~p\n", [N]),
     yaws:setopts(CliSock, [binary, {packet, raw}], SSL),
     if
 	N == 0 ->
-	    yaws:eat_crnl(CliSock, SSL),
-	    done;
+	    %% yaws:eat_crnl(CliSock, SSL),
+	    ?dbg("final chunk, done\n", []),
+	    final_chunk;
 	N > 0 ->
 	    upload_chunk_loop(CliSock, N, SegLen, FD, SSL)
     end.
 
 upload_chunk_loop(CliSock, Len, SegLen, FD, SSL) when Len > 0 ->
-    case yaws:cli_recv(CliSock, SegLen, SSL) of
+    ReadLen = min(Len, SegLen),
+    ?dbg("- read chunk ~p bytes\n", [ReadLen]),
+    case yaws:cli_recv(CliSock, ReadLen, SSL) of
 	{ok, Bin} ->
 	    ok = file:write(FD, Bin),
 	    upload_chunk_loop(CliSock, Len-size(Bin), SegLen, FD, SSL);
 	_Err ->
 	    exit(normal)
     end;
-upload_chunk_loop(_CliSock, 0, _SegLen, _FD, _SSL) ->
-    ok.
+upload_chunk_loop(CliSock, 0, _SegLen, _FD, SSL) ->
+    yaws:eat_crnl(CliSock, SSL),
+    ?dbg("- chunk done\n", []),
+    interim_chunk_done.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The chunk trailer (RFC 2616, 3.6.1) is only needed if the TE header
@@ -319,13 +322,13 @@ respond_to_100(CliSock, Head) ->
     Hdrs = Head#headers.other,
     case get_header("Expect", Hdrs) of
 	not_found ->
-	    io:format("Expect not found, skip\n", []),
+	    ?dbg("Expect not found, skip\n", []),
 	    ok;
 	{found, Val = ("100" ++_)} ->
-	    io:format("Expect found, ~p (sock: ~p)\n", [Val, CliSock]),
+	    ?dbg("Expect found, ~p (sock: ~p)\n", [Val, CliSock]),
 	    yaws:gen_tcp_send(CliSock, [<<"HTTP/1.1 100 Continue\r\n">>]);
 	{found, Val} ->
-	    io:format("Expect found, not 100: ~p\n", [Val]),
+	    ?dbg("Expect found, not 100: ~p\n", [Val]),
 	    ok
     end.
 
