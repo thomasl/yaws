@@ -1,0 +1,35 @@
+
+Local install:
+
+Clone into $(HOME)/git/yaws and cd there.
+
+YAWS=$(HOME)/git/yaws/local
+
+% ./configure --prefix=$(YAWS)
+% make && make install
+
+Start the server as:
+
+% $(YAWS)/bin/yaws -i
+
+A yaws.conf file configures the server(s) to be started. The local file
+is found as:
+
+For a pure debian lenny install:
+
+    2  apt-get install openssh-server
+    3  apt-get update
+    4  apt-get install sudo psmisc iproute iptraf strace
+   13  apt-get install emacs21-nox erlang erlang-mode
+   77  apt-get install csync2
+   91  apt-get install curl
+   93  apt-get install mysql-client
+  110  apt-get install libmyodbc
+  112  apt-get install libncursesw5
+  113  apt-get install less
+  114  apt-get install openssl
+  117  apt-get install perlconsole
+  120  apt-get install libpam0g-dev
+  121  apt-cache showpkg libpam0g-dev
+  122  apt-cache showpkg libpam-dev
+

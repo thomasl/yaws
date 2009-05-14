@@ -1,0 +1,16 @@
+bin/*
+c_src/*.o
+c_src/*.so
+ebin/*
+examples/ebin/*
+local/*
+priv/*.o
+priv/*.so
+priv/epam
+priv/lib/*.o
+priv/lib/*.so
+*.beam
+config.log
+config.status
+include.mk
+yaws.pc

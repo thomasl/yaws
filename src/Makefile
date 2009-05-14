@@ -26,12 +26,13 @@ MODULES=yaws \
 	mime_type_c \
 	mime_types \
 	yaws_session_server \
-	yaws_outmod \
+	yaws_404 \
 	yaws_revproxy \
 	yaws_html  \
 	yaws_log_file_h \
 	yaws_rss \
 	yaws_dav \
+	yaws_upload \
 	yaws_pam \
 	json jsonrpc yaws_jsonrpc yaws_xmlrpc\
 	haxe yaws_rpc \

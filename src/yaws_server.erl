@@ -1043,7 +1043,7 @@ handle_method_result(Res, CliSock, IP, GS, Req, H, Num) ->
                 Page ->
                     ok
             end,
-            put (sc, (get(sc))#sconf{appmods = []}),
+            put(sc, (get(sc))#sconf{appmods = []}),
             Call = call_method(Req#http_request.method, 
                                CliSock, 
                                Req#http_request{path = {abs_path, Page}}, 
@@ -1272,7 +1272,8 @@ not_implemented(CliSock, Req, Head) ->
 'PUT'(CliSock, Req, Head) ->
     ?Debug("PUT Req=~p~n H=~p~n", [?format_record(Req, http_request),
                                    ?format_record(Head, headers)]),
-    body_method(CliSock, Req, Head).
+    %% invoke yaws_put:body/3 perhaps? yaws_upload:body/3?
+    yaws_upload:body(CliSock, Req, Head).
 
 
 'DELETE'(CliSock, Req, Head) ->
@@ -1296,9 +1297,14 @@ not_implemented(CliSock, Req, Head) ->
 
 
 body_method(CliSock, Req, Head) ->
+    io:format("... body_method ...\n", []),
     SC=get(sc),
     ok = yaws:setopts(CliSock, [{packet, raw}, binary], yaws:is_ssl(SC)),
     PPS = SC#sconf.partial_post_size,
+    io:format("... content-length = ~p, te = ~p\n", 
+	      [Head#headers.content_length, 
+	       Head#headers.transfer_encoding]),
+    %% handle 
     Bin = case Head#headers.content_length of
               undefined ->
                   case Head#headers.transfer_encoding of
@@ -1332,6 +1338,7 @@ body_method(CliSock, Req, Head) ->
           end,
     ?Debug("Request data = ~s~n", [binary_to_list(un_partial(Bin))]),
     ARG = make_arg(CliSock, Head, Req, Bin),
+    io:format("... handle request ...\n", []),
     handle_request(CliSock, ARG, size(un_partial(Bin))).
 
 
@@ -1474,6 +1481,28 @@ handle_request(CliSock, ARG, N) ->
                                                          SC#sconf.redirect_map),
 
                             case {IsAuth, IsRev, IsRedirect} of
+                                {{appmod, Mod}, _, _} ->
+                                    %%This isn't the standard 'appmod' branch 
+                                    %%- this is an appmod call as optionally 
+                                    %% specified by the 
+                                    %% output of an auth module.
+                                    UT = #urltype{
+                                      type = appmod, 
+                                      data = {Mod, undefined},
+                                      path = DecPath
+                                     },
+
+
+                                    %%arg.prepath ?
+                                    ARG2 = ARG1#arg{
+                                             server_path = DecPath,
+                                             querydata= QueryString,
+                                             prepath=undefined,
+                                             pathinfo=undefined,
+                                             appmod_prepath=undefined,
+                                             appmoddata=undefined
+                                            },
+                                    handle_ut(CliSock, ARG2, UT, N);
                                 {_, _, {true, Redir}} ->
                                     deliver_302_map(CliSock, Req, ARG1, Redir);
                                 {true, false, _} ->
@@ -1525,14 +1554,10 @@ handle_request(CliSock, ARG, N) ->
                                 {true, {true, PP}, _} ->
                                     yaws_revproxy:init(CliSock, ARG1, DecPath, 
                                                        QueryString, PP, N);
-                                {false_403, _, _} ->
+                                {false, _, _} ->
                                     deliver_403(CliSock, Req);
-                                {false, _, _} ->		
-				    UT = #urltype{
-                                      type = unauthorized, 
-				      path = DecPath
-                                     },
-				    handle_ut(CliSock, ARG, UT, N)
+                                {{false, Realm}, _, _} ->
+                                    deliver_401(CliSock, Req, Realm)
                             end
                     end
             end;
@@ -1556,85 +1581,58 @@ set_auth_user(ARG, User) ->
     H2 = H#headers{authorization = Auth},
     ARG#arg{headers = H2}.
 
-%% Call is_auth(...)/5 with a default value.
-is_auth(ARG, Req_dir, H, L) ->
-    is_auth(ARG, Req_dir, H, L, {true, []}).
-
-%% Either no authentication was done or all methods returned false
-is_auth(_ARG, _Req_dir, _H, [], {Ret, Auth_headers}) -> 
-    yaws:outh_set_auth(Auth_headers),
-    Ret;
-
-is_auth(ARG, Req_dir, H, [{Auth_dir, Auth_methods}|T], {Ret, Auth_headers}) ->
+is_auth(_ARG, _Req_dir, _H, [] ) -> 
+    true;
+is_auth(ARG, Req_dir,H,[{Auth_dir, 
+                         Auth=#auth{realm=Realm, users=Users, 
+                                    pam=Pam, mod=Mod}}|T] ) ->
     case lists:prefix(Auth_dir, Req_dir) of
-	true ->
-	    Auth_H = H#headers.authorization,
-	    case handle_auth(ARG, Auth_H, Auth_methods) of
-
-		%% If we auth using an authmod we need to return User
-		%% so that we can set it in ARG.
-		{true, User} ->    
-		    {true, User};
-		false ->
-		    L = Auth_methods#auth.headers,
-		    is_auth(ARG, Req_dir, H, T, {false, L ++ Auth_headers});
-		Is_auth ->
-		    Is_auth
-	    end;
-	false ->
-	    is_auth(ARG, Req_dir, H, T, {Ret, Auth_headers})
+        true when Mod /= [] ->
+            case catch Mod:auth(ARG, Auth) of
+                {'EXIT', Reason} ->
+                    error_logger:format("authmod crashed: ~p~n", [Reason]),
+                    {false, ""};
+                {appmod, AppMod} ->
+                    {appmod, AppMod};
+                {true, User} -> 
+                    {true, User};
+                true ->
+                    true;
+                {false, Realm} ->
+                    maybe_auth_log({401, Realm}, ARG),
+                    {false, Realm};
+                _ ->
+                    maybe_auth_log(403, ARG),
+                    false
+            end;
+        true ->
+            case H#headers.authorization of
+                undefined ->
+                    maybe_auth_log({401, Realm}, ARG),
+                    {false, Realm};
+                {User, Password, _OrigString} ->
+                    case member({User, Password}, Users) of
+                        true ->
+                            maybe_auth_log({ok, User}, ARG),
+                            true;
+                        false when Pam == false ->
+                            maybe_auth_log({401, User, Password}, ARG),
+                            {false, Realm};
+                        false when Pam /= false ->
+                            case yaws_pam:auth(User, Password) of
+                                {yes, _} ->
+                                    maybe_auth_log({ok, User}, ARG),
+                                    true;
+                                {no, _Rsn} ->
+                                    maybe_auth_log({401, User, Password}, ARG),
+                                    {false, Realm}
+                            end
+                    end
+            end;
+        false ->
+            is_auth(ARG, Req_dir, H, T)
     end.
 
-handle_auth(ARG, _Auth_H, #auth{realm = Realm, users=[], pam=false, mod = []}) ->
-    maybe_auth_log({401, Realm}, ARG),
-    false;
-
-handle_auth(ARG, Auth_H, Auth_methods = #auth{mod = Mod}) when Mod /= [] ->
-    case catch Mod:auth(ARG, Auth_methods) of
-	{'EXIT', Reason} ->
-	    error_logger:format("authmod crashed: ~p~n", [Reason]),
-	    false;
-
-	%% appmod means the auth headers are undefined, i.e. false.
-	%% TODO: change so that authmods simply return true/false
-	{appmod, _AppMod} ->
-	    handle_auth(ARG, Auth_H, Auth_methods#auth{mod = []});
-	{true, User} -> 
-	    {true, User};
-	true ->
-	    true;
-	{false, _Realm} ->
-	    handle_auth(ARG, Auth_H, Auth_methods#auth{mod = []});
-	_ ->
-	    maybe_auth_log(403, ARG),
-	    false_403
-    end;
-
-%% if the headers are undefined we do not need to check Pam or Users
-handle_auth(ARG, undefined, Auth_methods) ->
-    handle_auth(ARG, undefined, Auth_methods#auth{pam = false, users= []});
-
-handle_auth(ARG, {User, Password, OrigString}, Auth_methods = #auth{pam = Pam}) when Pam /= false ->
-    case yaws_pam:auth(User, Password) of
-	{yes, _} ->
-	    maybe_auth_log({ok, User}, ARG),
-	    true;
-	{no, _Rsn} ->
-	    handle_auth(ARG, {User, Password, OrigString}, Auth_methods#auth{pam = false})
-    end;
-
-
-
-
-handle_auth(ARG, {User, Password, OrigString}, Auth_methods = #auth{users = Users}) when Users /= [] ->
-    case member({User, Password}, Users) of
-	true ->
-	    maybe_auth_log({ok, User}, ARG),
-	    true;
-	false ->
-	    handle_auth(ARG, {User, Password, OrigString}, Auth_methods#auth{users = []})
-    end.
-	    
 
 is_revproxy(_,[]) ->
     false;
@@ -1659,25 +1657,7 @@ is_redirect_map(Path, [E={Prefix, _URL, _AppendMode}|Tail]) ->
 
 %% Return values:
 %% continue, done, {page, Page}
-handle_ut(CliSock, ARG, UT = #urltype{type = unauthorized}, N) ->
-    Req = ARG#arg.req,
-    H = ARG#arg.headers,
-    SC = get(sc),
-    yaws:outh_set_dyn_headers(Req, H, UT),
 
-    %% outh_set_dyn headers sets status to 200 by default
-    %% so we need to set it 401
-    yaws:outh_set_status_code(401),
-    deliver_dyn_part(CliSock,
-		     0,
-		     "appmod",
-		     N,
-		     ARG,
-		     UT,
-		     fun(A)->(SC#sconf.errormod_401):out401(A)
-		     end,
-		     fun(A)->finish_up_dyn_file(A, CliSock)
-		     end);
 
 handle_ut(CliSock, ARG, UT = #urltype{type = error}, N) ->
     Req = ARG#arg.req,
@@ -1880,6 +1860,7 @@ handle_ut(CliSock, ARG, UT = #urltype{type = dav}, N) ->
     Next =
         if
             Req#http_request.method == 'PUT' ->
+		io:format("PUT arrived\n", []),
                 fun(A) -> yaws_dav:put(SC, A) end;
             Req#http_request.method == 'DELETE' ->
                 fun(A) -> yaws_dav:delete(A) end;
@@ -2082,6 +2063,23 @@ deliver_xxx(CliSock, _Req, Code, ExtraHtml) ->
 
 deliver_400(CliSock, Req) ->  
     deliver_xxx(CliSock, Req, 400).% Bad Request
+
+deliver_401(CliSock, _Req, Realm) ->
+    B = list_to_binary("<html> <h1> 401 authentication needed  "
+                       "</h1></html>"),
+    H = #outh{status = 401,
+              doclose = true,
+              chunked = false,
+              server = yaws:make_server_header(),
+              connection = yaws:make_connection_close_header(true),
+              content_length = yaws:make_content_length_header(size(B)),
+              www_authenticate = yaws:make_www_authenticate_header(Realm),
+              contlen = size(B),
+              content_type = yaws:make_content_type_header("text/html")},
+    put(outh, H),
+    accumulate_content(B),
+    deliver_accumulated(CliSock),
+    done.
 
 deliver_403(CliSock, Req) ->
     deliver_xxx(CliSock, Req, 403).        % Forbidden
@@ -3384,10 +3382,15 @@ do_url_type(SC, GetPath, ArgDocroot, VirtualDir) ->
 
     case GetPath of
         _ when ?sc_has_dav(SC) ->
+	    %% UNFINISHED
+	    %% this doesn't handle e.g, "GET /" ...
+	    io:format("URL has dav: url = ~p, sc = ~p\n", [GetPath, SC]),
             {Comps, RevFile} = comp_split(GetPath),
             {_Type, Mime} = suffix_type(RevFile),
 
             FullPath = construct_fullpath(ArgDocroot, GetPath, VirtualDir),
+
+	    io:format("Full path = ~p\n", [FullPath]),
 
             %%!!WARNING!!!
             %%!TODO - review & test!
