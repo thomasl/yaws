@@ -74,10 +74,14 @@
 %% (or reject it).
 %%
 %% UNFINISHED
-%% - check that Content-Range is not present
+%% - return status code and other stuff in response!
+%%   (201 Created if new, 204 No Content if updated)
+%% - check that Content-Range header is not present
+%%   * or handle it, file:pwrite/2
+%% - URI encoding/decoding? esp. combined with UTF-8 ...
 %% - map URL to storage with external module (config'd per server)
-%% - currently writes to target file directly rather than upload+move
-%% - measure size of process
+%% - upload+move rather than overwrite existing file
+%% - measure size of process when done
 
 body(CliSock, Req, Head) ->
     ?dbg("... body_method ...\n", []),
