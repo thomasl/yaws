@@ -1275,7 +1275,6 @@ not_implemented(CliSock, Req, Head) ->
 'PUT'(CliSock, Req, Head) ->
     ?Debug("PUT Req=~p~n H=~p~n", [?format_record(Req, http_request),
                                    ?format_record(Head, headers)]),
-    %% invoke yaws_put:body/3 perhaps? yaws_upload:body/3?
     yaws_upload:body(CliSock, Req, Head).
 
 

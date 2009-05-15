@@ -98,6 +98,7 @@ body(CliSock, Req, Head) ->
     %% when upload completes, move tempfile to destfile 
     DocRoot = SC#sconf.docroot,
     File = file_of_url(DocRoot, Req),
+    PrevExist = dest_file_exists(File),
     {ok, FD} = file:open(File, [append, raw, delayed_write]),
     try 
 	case respond_to_100(CliSock, Head) of
@@ -110,7 +111,12 @@ body(CliSock, Req, Head) ->
 				?dbg("chunked transfer\n", []),
 				SegLen = upload_segment_length(PPS),
 				upload_chunks(CliSock, FD, SegLen, SSL),
-				deliver_201(CliSock, Req);
+				case PrevExist of
+				    true ->
+					deliver_204(CliSock, Req);
+				    false ->
+					deliver_201(CliSock, Req)
+				end;
 			    Enc ->
 				?dbg("Unknown transfer-encoding: ~p\n", 
 				     [Enc]),
@@ -123,7 +129,12 @@ body(CliSock, Req, Head) ->
 			upload_body_length(
 			  CliSock, FD, Len, SegLen, SSL
 			 ),
-			deliver_201(CliSock, Req)
+			case PrevExist of
+			    true ->
+				deliver_204(CliSock, Req);
+			    false ->
+				deliver_201(CliSock, Req)
+			end
 		end;
 	    Err ->
 		%% final response has been sent, done
@@ -135,9 +146,14 @@ body(CliSock, Req, Head) ->
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%
+%% Note: the final argument is emitted as html in the response.
 
 deliver_201(CliSock, Req) ->
     yaws_server:deliver_xxx(CliSock, Req, 201, "Created").
+    
+deliver_204(CliSock, Req) ->
+    yaws_server:deliver_xxx(CliSock, Req, 204, "Updated").
     
 deliver_500(CliSock, Req) ->
     yaws_server:deliver_xxx(CliSock, Req, 500, "Internal Server Error").
@@ -174,6 +190,19 @@ file_of_url(DocRoot, Req) ->
 	    Tempfile;
 	Err ->
 	    ?dbg("UNFINISHED - Unable to map ~p\n", [Err])
+    end.
+
+dest_file_exists(File) ->
+    case file:read_file_info(File) of
+	{ok, _Finfo} ->
+	    %% check permissions? e.g., write perm
+	    %% for a web server, you generally own all the data
+	    %% so probably not needed
+	    true;
+	{error, enoent} ->
+	    false;
+	{error, Other} ->
+	    ?dbg("File check for ~s: error ~p\n", [File, Other])
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
