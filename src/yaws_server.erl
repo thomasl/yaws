@@ -22,6 +22,9 @@
 %% External exports
 -export([start_link/1]).
 
+-export([deliver_xxx/3,
+	 deliver_xxx/4
+	]).
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([status/0,

@@ -109,12 +109,12 @@ body(CliSock, Req, Head) ->
 				%% transfer in chunks	
 				?dbg("chunked transfer\n", []),
 				SegLen = upload_segment_length(PPS),
-				upload_chunks(CliSock, FD, SegLen, SSL);
+				upload_chunks(CliSock, FD, SegLen, SSL),
+				deliver_201(CliSock, Req);
 			    Enc ->
 				?dbg("Unknown transfer-encoding: ~p\n", 
 				     [Enc]),
-				%% return an error
-				exit(nyi)
+				deliver_500(CliSock, Req)
 			end;
 		    Len_lst ->
 			Len = list_to_integer(Len_lst),
@@ -122,16 +122,28 @@ body(CliSock, Req, Head) ->
 			SegLen = upload_segment_length(PPS),
 			upload_body_length(
 			  CliSock, FD, Len, SegLen, SSL
-			 )
+			 ),
+			deliver_201(CliSock, Req)
 		end;
 	    Err ->
 		%% final response has been sent, done
 		?dbg("error respond_to_100: ~p\n", [Err]),
-		exit({nyi, Err})
+		deliver_500(CliSock, Req)
 	end
     after
 	file:close(FD)
     end.
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+deliver_201(CliSock, Req) ->
+    yaws_server:deliver_xxx(CliSock, Req, 201, "Created").
+    
+deliver_500(CliSock, Req) ->
+    yaws_server:deliver_xxx(CliSock, Req, 500, "Internal Server Error").
+
+deliver_501(CliSock, Req) ->
+    yaws_server:deliver_xxx(CliSock, Req, 501, "Not implemented").
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The segment length is the size of each chunk read from the socket
@@ -152,6 +164,7 @@ upload_segment_length(X) ->
 %% - resolve to actual fs path
 %% - e.g., use docroot ++ path for abspath
 %%   or a "map to storage handler"
+%% - UTF-8?
 
 file_of_url(DocRoot, Req) ->
     case Req#http_request.path of
@@ -217,7 +230,7 @@ upload_body_all(CliSock, FD, SegLen, SSL) ->
 %%
 %% Upload a chunked-encoding request body
 %%
-%% NB: this is 
+%% Each chunk is loaded in a loop of SegLen-sized subchunks
 
 upload_chunks(CliSock, FD, SegLen, SSL) ->
     case upload_chunk(CliSock, FD, SegLen, SSL) of
@@ -321,6 +334,9 @@ chunk_len([], _Val) ->
 %%
 %% If the request has sent an "Expect: 100-continue" header, send 
 %% an appropriate status code back, 100 if you want to continue.
+%%
+%% See also yaws_server:'POST'/3 and yaws_server:deliver_100/1 for
+%% how this is handled in main yaws.
 %%
 %% UNFINISHED
 %% - currently just responds with a 100, even though we could run
