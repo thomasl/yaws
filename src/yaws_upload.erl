@@ -182,6 +182,9 @@ upload_segment_length(X) ->
 %%   or a "map to storage handler"
 %% - UTF-8?
 
+%%file_of_url(DocRoot, Req) ->
+%%    %% for testing
+%%    "/dev/null";
 file_of_url(DocRoot, Req) ->
     case Req#http_request.path of
 	{abs_path, Path} ->
@@ -226,6 +229,7 @@ upload_loop(CliSock, FD, Len, SegLen, SSL) when Len > 0 ->
     case gen_tcp:recv(CliSock, ReadLen, Read_timeout) of
 	{ok, Bin} ->
 	    ok = file:write(FD, Bin),
+	    erlang:yield(),
 	    upload_loop(CliSock, FD, Len-size(Bin), SegLen, SSL);
 	_Err ->
 	    exit(normal)
@@ -289,6 +293,7 @@ upload_chunk_loop(CliSock, Len, SegLen, FD, SSL) when Len > 0 ->
     case yaws:cli_recv(CliSock, ReadLen, SSL) of
 	{ok, Bin} ->
 	    ok = file:write(FD, Bin),
+	    erlang:yield(),
 	    upload_chunk_loop(CliSock, Len-size(Bin), SegLen, FD, SSL);
 	_Err ->
 	    exit(normal)
