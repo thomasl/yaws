@@ -97,7 +97,9 @@ body(CliSock, Req, Head) ->
     DocRoot = SC#sconf.docroot,
     File = file_of_url(DocRoot, Req),
     PrevExist = dest_file_exists(File),
-    {ok, FD} = file:open(File, [append, raw, delayed_write]),
+    {ok, TmpFile, FD} = yaws_tmpfile:open(File, [append, raw, delayed_write]),
+    ?dbg("upload ~p -> tmpfile ~p\n", [Req#http_request.path, File]),
+    %% Note: 
     try 
 	case respond_to_100(CliSock, Head) of
 	    ok ->
@@ -109,6 +111,8 @@ body(CliSock, Req, Head) ->
 				?dbg("chunked transfer\n", []),
 				SegLen = upload_segment_length(PPS),
 				upload_chunks(CliSock, FD, SegLen, SSL),
+				?dbg("rename ~p -> ~p\n", [TmpFile, File]),
+				ok = file:rename(TmpFile, File),
 				case PrevExist of
 				    true ->
 					deliver_204(CliSock, Req);
@@ -127,6 +131,8 @@ body(CliSock, Req, Head) ->
 			upload_body_length(
 			  CliSock, FD, Len, SegLen, SSL
 			 ),
+			?dbg("rename ~p -> ~p\n", [TmpFile, File]),
+			ok = file:rename(TmpFile, File),
 			case PrevExist of
 			    true ->
 				deliver_204(CliSock, Req);
@@ -139,8 +145,21 @@ body(CliSock, Req, Head) ->
 		?dbg("error respond_to_100: ~p\n", [Err]),
 		deliver_500(CliSock, Req)
 	end
+    catch
+	Type:Exn ->
+	    ?dbg("Exception ~p:~p when uploading ~p -> ~p\n",
+		 [Type, Exn, Req#http_request.path, TmpFile])
     after
-	file:close(FD)
+	%% always close and delete the tempfile when done
+	file:close(FD),
+        case file:delete(TmpFile) of
+	    ok ->
+		?dbg("Upload failed, deleted tmpfile ~p\n", [TmpFile]);
+	    _ ->
+		%% delete fails if file has been renamed, which means
+		%% upload okay
+		ok
+	end
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
