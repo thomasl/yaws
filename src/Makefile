@@ -33,6 +33,7 @@ MODULES=yaws \
 	yaws_rss \
 	yaws_dav \
 	yaws_upload \
+	yaws_tmpfile \
 	yaws_pam \
 	json jsonrpc yaws_jsonrpc yaws_xmlrpc\
 	haxe yaws_rpc \
