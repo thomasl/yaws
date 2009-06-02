@@ -74,8 +74,6 @@
 %% (or reject it).
 %%
 %% UNFINISHED
-%% - return status code and other stuff in response!
-%%   (201 Created if new, 204 No Content if updated)
 %% - check that Content-Range header is not present
 %%   * or handle it, file:pwrite/2
 %% - URI encoding/decoding? esp. combined with UTF-8 ...
@@ -146,20 +144,26 @@ body(CliSock, Req, Head) ->
     end.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%
-%% Note: the final argument is emitted as html in the response.
+
+%% "Created"
 
 deliver_201(CliSock, Req) ->
-    yaws_server:deliver_xxx(CliSock, Req, 201, "Created").
+    yaws_server:deliver_xxx(CliSock, Req, 201).
     
+%% "Updated"
+
 deliver_204(CliSock, Req) ->
-    yaws_server:deliver_xxx(CliSock, Req, 204, "Updated").
+    yaws_server:deliver_xxx(CliSock, Req, 204).
     
+%% "Internal Server Error"
+
 deliver_500(CliSock, Req) ->
-    yaws_server:deliver_xxx(CliSock, Req, 500, "Internal Server Error").
+    yaws_server:deliver_xxx(CliSock, Req, 500).
+
+%% "Not Implemented"
 
 deliver_501(CliSock, Req) ->
-    yaws_server:deliver_xxx(CliSock, Req, 501, "Not implemented").
+    yaws_server:deliver_xxx(CliSock, Req, 501).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% The segment length is the size of each chunk read from the socket
@@ -177,10 +181,10 @@ upload_segment_length(X) ->
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
 %% UNFINISHED
-%% - resolve to actual fs path
+%% - resolve to actual fs path => use rewrite mod?
 %% - e.g., use docroot ++ path for abspath
 %%   or a "map to storage handler"
-%% - UTF-8?
+%% - handling of UTF-8 in filenames?
 
 %%file_of_url(DocRoot, Req) ->
 %%    %% for testing
@@ -216,6 +220,10 @@ dest_file_exists(File) ->
 %% - body length known
 %% - body length unknown
 %% - body uses chunked transfer-encoding
+%%
+%% UNFINISHED
+%% - we should use yaws:do_recv/3 instead of gen_tcp:recv/3, but
+%%   would like to have a read timeout too
 
 upload_body_length(CliSock, FD, Len, SegLen, SSL) ->
     yaws:setopts(CliSock, [binary, {packet, raw}], SSL),
@@ -224,9 +232,8 @@ upload_body_length(CliSock, FD, Len, SegLen, SSL) ->
 upload_loop(CliSock, FD, Len, SegLen, SSL) when Len > 0 ->
     ReadLen = min(Len, SegLen),
     ?dbg("wait for ~p bytes ...\n", [ReadLen]),
-    % case yaws:do_recv(CliSock, SegLen, SSL) of
-    Read_timeout = 3000,
-    case gen_tcp:recv(CliSock, ReadLen, Read_timeout) of
+    %% case gen_tcp:recv(CliSock, ReadLen, ?upload_read_timeout) of
+    case yaws:do_recv(CliSock, ReadLen, SSL) of
 	{ok, Bin} ->
 	    ok = file:write(FD, Bin),
 	    erlang:yield(),
@@ -248,19 +255,6 @@ min(X, Y) ->
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
-%% Upload a request body until EOF
-
-upload_body_all(CliSock, FD, SegLen, SSL) ->
-    case yaws:cli_recv(CliSock, SegLen, SSL) of
-	{ok, Bin} ->
-	    ok = file:write(FD, Bin),
-	    upload_body_all(CliSock, FD, SegLen, SSL);
-	_Err ->
-	    exit(normal)
-    end.
-
-%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%%
 %% Upload a chunked-encoding request body
 %%
 %% Each chunk is loaded in a loop of SegLen-sized subchunks
@@ -274,7 +268,6 @@ upload_chunks(CliSock, FD, SegLen, SSL) ->
     end.
 
 upload_chunk(CliSock, FD, SegLen, SSL) ->
-    yaws:setopts(CliSock, [list, {packet, line}], SSL),
     N = get_chunk_length(CliSock, SSL),
     ?dbg("Chunk length: ~p\n", [N]),
     yaws:setopts(CliSock, [binary, {packet, raw}], SSL),
@@ -304,10 +297,10 @@ upload_chunk_loop(CliSock, 0, _SegLen, _FD, SSL) ->
     interim_chunk_done.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
-%% The chunk trailer (RFC 2616, 3.6.1) is only needed if the TE header
+%% NB. The chunk trailer (RFC 2616, 3.6.1) is only needed if the TE header
 %% indicates "trailers" is acceptable.
 %%   I think trailers only appear in the server response, if the client
-%% accepts this with a "TE" header.
+%% accepts this with a "TE" header. Thus, NOT RELEVANT for uploads.
 %%
 %% 14.40: 0, 1 or more
 %%   Trailer: header-name
@@ -316,15 +309,14 @@ upload_chunk_loop(CliSock, 0, _SegLen, _FD, SSL) ->
 %% 14.39: 0, 1, or more
 %%   TE: trailers
 %%   TE: transfer-extension [accept-params]
-%%
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%
-%% Get the chunk length for chunked encoding.
-%%
-%% Requires socket in line/list mode.
+%% Get the chunk length for chunked encoding. This appears as
+%% a line "dddd[;...]CRLF"
 
 get_chunk_length(CliSock, SSL) ->
+    yaws:setopts(CliSock, [list, {packet, line}], SSL),
     case yaws:cli_recv(CliSock, 0, SSL) of
 	{ok, Lst} ->
 	    case catch chunk_len(Lst) of
