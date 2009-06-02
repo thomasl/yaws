@@ -4,12 +4,12 @@
 %%% Created :  2 Jun 2009 by Thomas Lindgren <thomasl@uploader-server.virtual.diino.net>
 
 -module(yaws_tmpfile).
--export([name/1, open/2]).
+-export([name/1, open/1, open/2]).
 -compile(export_all).
 
 -include_lib("kernel/include/file.hrl").
 
-%% This is inspired by the corresponding perl module:
+%% This is inspired by the File::Temp perl module
 %% - replace occurrences of "X" in the Stem string and opens the file
 %%
 %% Example:
@@ -49,6 +49,9 @@ name(Stem, N) when N > 0 ->
     end;
 name(Stem, 0) ->
     exit({{?MODULE, name, 2}, too_many_collisions}).
+
+open(Stem) ->
+    open(Stem, [write]).
 
 open(Stem, Opts) ->
     File = name(Stem),
