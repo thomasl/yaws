@@ -1583,11 +1583,13 @@ set_auth_user(ARG, User) ->
     H2 = H#headers{authorization = Auth},
     ARG#arg{headers = H2}.
 
-is_auth(_ARG, _Req_dir, _H, [] ) -> 
+is_auth(_ARG, Req_dir, _H, [] ) -> 
+    io:format("No auth for ~p\n", [Req_dir]),
     true;
 is_auth(ARG, Req_dir,H,[{Auth_dir, 
                          Auth=#auth{realm=Realm, users=Users, 
                                     pam=Pam, mod=Mod}}|T] ) ->
+    io:format("Invoking authmod ~p for ~p\n", [Mod, Req_dir]),
     case lists:prefix(Auth_dir, Req_dir) of
         true when Mod /= [] ->
             case catch Mod:auth(ARG, Auth) of
