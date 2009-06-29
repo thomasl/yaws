@@ -17,6 +17,9 @@
 %%     => "/tmp/yaws_O4DjAa"
 %%   yaws_tmpfile:open("/tmp/yaws_XXXXXX", Opts) 
 %%     => {ok, "/tmp/yaws_AaHGtt", FD}
+%% or even
+%%   yaws_tmpfile:open(Actual_file ++ "_XXXXXX", Opts)
+%%     => {ok, "/path/to/file_Aa04Eh", FD}
 %%
 %% Note: open/2 is probably the one you want. Since we have no file locks, 
 %% there is no way to actually securely reserve the filename though.

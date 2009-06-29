@@ -74,7 +74,7 @@
                    certfile,
                    cacertfile
                   }).
-
+-define(dbg(Str, Xs), io:format("~p:~p " ++ Str, [?MODULE, ?LINE | Xs])).
 -define(elog(X,Y), error_logger:info_msg("*elog ~p:~p: " X,
                                          [?MODULE, ?LINE | Y])).
 
@@ -221,7 +221,6 @@ init2(GC, Sconfs, RunMod, Embedded, FirstTime) ->
                 pairs = L2,
                 mnum = 0,
                 embedded = Embedded}}.
-
 
 
 start_group(GC, Group) ->
@@ -1275,12 +1274,62 @@ not_implemented(CliSock, Req, Head) ->
 'PUT'(CliSock, Req, Head) ->
     ?Debug("PUT Req=~p~n H=~p~n", [?format_record(Req, http_request),
                                    ?format_record(Head, headers)]),
-    yaws_upload:body(CliSock, Req, Head).
+    try
+	EmptyBin = << >>,
+	SC = get(sc),
+	?dbg("Starting PUT\n", []),
+	ARG = make_preliminary_arg(CliSock, Head, Req, EmptyBin),
+	?dbg("Dispatch on path\n", []),
+	case Req#http_request.path of
+	    {abs_path,RawPath} ->
+		?dbg("Decode abspath ~p\n", [RawPath]),
+		case (catch yaws_api:url_decode_q_split(RawPath)) of
+		    {'EXIT', Rsn} ->
+			?dbg("Bad URL: ~p\n", [RawPath]),
+			deliver_500(CliSock, Req);
+		    {DecPath,QueryPart} ->
+			?dbg("Auth ~p with auth header ~p\n",
+			     [DecPath, (ARG#arg.headers)#headers.authorization]),
+			case is_auth(ARG, DecPath,
+				     ARG#arg.headers,
+				     SC#sconf.authdirs) of
+			    {true, User} ->
+				?dbg("Auth OK, user = ~p\n",[User]),
+				ARG2 = set_auth_user(ARG, User),
+				ARG3 = apply(SC#sconf.arg_rewrite_mod, 
+					     arg_rewrite, [ARG2]),
+				yaws_upload:body(ARG3);
+			    true ->
+				?dbg("Auth OK\n",[]),
+				ARG2 = apply(SC#sconf.arg_rewrite_mod, 
+					     arg_rewrite, [ARG]),
+				yaws_upload:body(ARG2);
+			    false -> 
+				?dbg("Auth failed, 401\n", []),
+				%% get the realm
+				%% Auth=Head#headers.authorization,
+				%% {_User,_Password,Realm}=Auth,
+				?dbg("UNFINISHED - realm set by default\n", []),
+				Realm = "DAV",
+				deliver_401(CliSock, Req, Realm)
+			end
+		end;
+	    OtherPath ->
+		?dbg("PUT: Unable to handle path ~p\n", [OtherPath]),
+		deliver_500(CliSock, Req)
+	end
+    catch
+	Ty:Exn ->
+	    deliver_internal_exception(CliSock, Req, Ty, Exn)
+    end.
 
-
+deliver_internal_exception(CliSock, Req, Ty, Exn) ->
+    Path = Req#http_request.path,
+    ?dbg("PUT ~p ~p ~p: deliver 500", [Path, Ty, Exn]),
+    deliver_500(CliSock, Req).
+    
 'DELETE'(CliSock, Req, Head) ->
     no_body_method(CliSock, Req, Head).
-
 
 %%%
 %%% WebDav specifics: PROPFIND, MKCOL,....
@@ -1353,9 +1402,42 @@ no_body_method(CliSock, Req, Head) ->
     flush(CliSock, Head#headers.content_length),
     ARG = make_arg(CliSock, Head, Req, undefined),
     handle_request(CliSock, ARG, 0).
-
-
+   
 make_arg(CliSock, Head, Req, Bin) ->
+    SC = get(sc),
+    IP = if
+             is_port(CliSock) ->
+                 case inet:peername(CliSock) of
+                     {ok, IpPort} ->
+                         IpPort;
+                     _ ->
+                         {unknown, unknown}
+                 end;
+             true ->
+                 case ssl:peername(CliSock) of
+                     {ok, IpPort} ->
+                         IpPort;
+                     _ ->
+                         {unknown, unknown}
+                 end
+         end,
+    
+    ARG = #arg{clisock = CliSock,
+               client_ip_port = IP,
+               headers = Head,
+               req = Req,
+               opaque = SC#sconf.opaque,
+               pid = self(),
+               docroot = SC#sconf.docroot,
+               docroot_mount = "/",
+               clidata = Bin
+              },
+    apply(SC#sconf.arg_rewrite_mod, arg_rewrite, [ARG]).
+
+%% This version doesn't invoke arg_rewrite
+%%  We do it this (somewhat convoluted) way to handle yaws_upload
+
+make_preliminary_arg(CliSock, Head, Req, Bin) ->
     SC = get(sc),
     IP = if
              is_port(CliSock) ->
@@ -1382,9 +1464,7 @@ make_arg(CliSock, Head, Req, Bin) ->
                docroot = SC#sconf.docroot,
                docroot_mount = "/",
                clidata = Bin
-              },
-    apply(SC#sconf.arg_rewrite_mod, arg_rewrite, [ARG]).
-
+	      }.
 
 handle_extension_method("PROPFIND", CliSock, Req, Head) ->
     'PROPFIND'(CliSock, Req, Head);   
@@ -1465,10 +1545,10 @@ handle_request(CliSock, ARG, N) ->
                                    [ARGvdir]),
                             deliver_xxx(CliSock, Req, 500);
                         sane ->
-                            ?Debug("Test revproxy: ~p and ~p~n", 
+			    ?Debug("Test revproxy: ~p and ~p~n", 
                                    [DecPath, SC#sconf.revproxy]),
 
-                            {IsAuth, ARG1} =
+			    {IsAuth, ARG1} =
                                 case is_auth(ARG, DecPath,ARG#arg.headers,
                                              SC#sconf.authdirs) of
                                     {true, User} ->
@@ -1584,13 +1664,14 @@ set_auth_user(ARG, User) ->
     ARG#arg{headers = H2}.
 
 is_auth(_ARG, Req_dir, _H, [] ) -> 
-    io:format("No auth for ~p\n", [Req_dir]),
+    ?dbg("No auth for ~p\n", [Req_dir]),
     true;
 is_auth(ARG, Req_dir,H,[{Auth_dir, 
                          Auth=#auth{realm=Realm, users=Users, 
-                                    pam=Pam, mod=Mod}}|T] ) ->
-    io:format("Invoking authmod ~p for ~p\n", [Mod, Req_dir]),
+                                    pam=Pam, mod=Mod}}|T] = S_Info ) ->
+    %?dbg("Invoking authmod ~p for req dir ~p: ~p\n", [Mod, Req_dir, S_Info]),
     case lists:prefix(Auth_dir, Req_dir) of
+	%% invoke auth_mod
         true when Mod /= [] ->
             case catch Mod:auth(ARG, Auth) of
                 {'EXIT', Reason} ->
@@ -1609,6 +1690,7 @@ is_auth(ARG, Req_dir,H,[{Auth_dir,
                     maybe_auth_log(403, ARG),
                     false
             end;
+	%% no auth_mod
         true ->
             case H#headers.authorization of
                 undefined ->
@@ -2115,6 +2197,9 @@ deliver_416(CliSock, _Req, Tot) ->
 
 deliver_501(CliSock, Req) ->
     deliver_xxx(CliSock, Req, 501). % Not implemented
+
+deliver_500(CliSock, Req) ->
+    deliver_xxx(CliSock, Req, 500). % Internal Server Error
 
 
 

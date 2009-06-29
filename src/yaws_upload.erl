@@ -44,20 +44,20 @@
 %% - SSL handling uncertain
 
 -module(yaws_upload).
--export([body/3]).
-
--compile(export_all).
+-export([body/1]).
 
 -include("../include/yaws_dav.hrl").
 -include("../include/yaws_api.hrl").
 -include("../include/yaws.hrl").
 -include("yaws_debug.hrl").
--include_lib("xmerl/include/xmerl.hrl").
 -include_lib("kernel/include/file.hrl").
 
 
 -define(elog(X,Y), error_logger:info_msg("*elog ~p:~p: " X,
                                          [?MODULE, ?LINE | Y])).
+
+-define(tmpfile(File), ((File) ++ "_XXXXXX")).
+-define(stem,"/tmp/upload_XXXXXX").
 
 %% UNFINISHED
 %% - should map to a proper logger in time
@@ -73,32 +73,36 @@
 %% The body/3 method is invoked by yaws_server to complete an upload
 %% (or reject it).
 %%
+%% NOTE:
+%%  We use ?tmpfile() to ensure that the tmp file ends up in the same
+%% filesystem as the destination file. This is done to avoid costly
+%% cross-fs copying in some cases.
+%%
 %% UNFINISHED
 %% - check that Content-Range header is not present
 %%   * or handle it, file:pwrite/2
-%% - URI encoding/decoding? esp. combined with UTF-8 ...
-%% - map URL to storage with external module (config'd per server)
-%% - upload+move rather than overwrite existing file
 %% - measure size of process when done
 
-body(CliSock, Req, Head) ->
-    ?dbg("... body_method ...\n", []),
+body(ARG) ->
+    ?dbg("... upload body/1 ...\n", []),
+    CliSock = ARG#arg.clisock,
+    Req = ARG#arg.req,
+    Head = ARG#arg.headers,
     SC = get(sc),
     SSL = yaws:is_ssl(SC),
     ok = yaws:setopts(CliSock, [{packet, raw}, binary], SSL),
     PPS = SC#sconf.partial_post_size,
-    ?dbg("... content-length = ~p, te = ~p\n", 
-	      [Head#headers.content_length, 
-	       Head#headers.transfer_encoding]),
-    ?dbg("Headers: ~p\n", [Head]),
     %% open tempfile as FD
     %% if upload fails, delete tempfile
     %% when upload completes, move tempfile to destfile 
-    DocRoot = SC#sconf.docroot,
+    DocRoot = ARG#arg.docroot,
     File = file_of_url(DocRoot, Req),
     PrevExist = dest_file_exists(File),
-    {ok, TmpFile, FD} = yaws_tmpfile:open(File, [append, raw, delayed_write]),
-    ?dbg("upload ~p -> tmpfile ~p\n", [Req#http_request.path, File]),
+    %% the seed/0 should be done at startup (start of application?)
+    yaws_tmpfile:seed(),
+    {ok, TmpFile, FD} = 
+	yaws_tmpfile:open(?tmpfile(File), [append, raw, delayed_write]),
+    ?dbg("upload ~p -> tmpfile ~p\n", [Req#http_request.path, TmpFile]),
     %% Note: 
     try 
 	case respond_to_100(CliSock, Head) of
@@ -132,12 +136,18 @@ body(CliSock, Req, Head) ->
 			  CliSock, FD, Len, SegLen, SSL
 			 ),
 			?dbg("rename ~p -> ~p\n", [TmpFile, File]),
-			ok = file:rename(TmpFile, File),
-			case PrevExist of
-			    true ->
-				deliver_204(CliSock, Req);
-			    false ->
-				deliver_201(CliSock, Req)
+			case file:rename(TmpFile, File) of
+			    ok ->
+				case PrevExist of
+				    true ->
+					deliver_204(CliSock, Req);
+				    false ->
+					deliver_201(CliSock, Req)
+				end;
+			    {error, Err} ->
+				?dbg("Error ~p on rename ~p -> ~p\n", 
+				     [file:format_error(Err), TmpFile, File]),
+				deliver_400(CliSock, Req)
 			end
 		end;
 	    Err ->
@@ -158,6 +168,7 @@ body(CliSock, Req, Head) ->
 	    _ ->
 		%% delete fails if file has been renamed, which means
 		%% upload okay
+		?dbg("Upload done\n", []),
 		ok
 	end
     end.
@@ -174,6 +185,11 @@ deliver_201(CliSock, Req) ->
 deliver_204(CliSock, Req) ->
     yaws_server:deliver_xxx(CliSock, Req, 204).
     
+%% "Forbidden"
+
+deliver_400(CliSock, Req) ->
+    yaws_server:deliver_xxx(CliSock, Req, 400).
+
 %% "Internal Server Error"
 
 deliver_500(CliSock, Req) ->
@@ -203,11 +219,7 @@ upload_segment_length(X) ->
 %% - resolve to actual fs path => use rewrite mod?
 %% - e.g., use docroot ++ path for abspath
 %%   or a "map to storage handler"
-%% - handling of UTF-8 in filenames?
 
-%%file_of_url(DocRoot, Req) ->
-%%    %% for testing
-%%    "/dev/null";
 file_of_url(DocRoot, Req) ->
     case Req#http_request.path of
 	{abs_path, Path} ->
@@ -419,5 +431,3 @@ get_header(Hdr, []) ->
 
 fold_headers(F, St, Arg) ->
     lists:foldl(F, St, Arg#arg.headers).
-
-    
