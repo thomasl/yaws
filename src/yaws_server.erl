@@ -18,6 +18,14 @@
 
 -export([mappath/3, vdirpath/3]).
 
+%% UNFINISHED
+%% - this should NOT be in a general yaws server, see get_realm/1
+-define(default_realm, "DAV").
+
+%% -define(xinfo(Str, Xs), logging:info(?MODULE, ?LINE, Str, Xs)).
+%% -define(xerror(Str, Xs), logging:error(?MODULE, ?LINE, Str, Xs)).
+-define(xinfo(Str, Xs), ok).
+-define(xerror(Str, Xs), ok).
 
 %% External exports
 -export([start_link/1]).
@@ -39,6 +47,7 @@
          accumulate_content/1, deliver_accumulated/5, setup_dirs/1,
          deliver_dyn_part/8, finish_up_dyn_file/2
         ]).
+-export([gserv_loop_0/4]).
 
 -export(['GET'/3,
          'POST'/3,
@@ -74,9 +83,17 @@
                    certfile,
                    cacertfile
                   }).
--define(dbg(Str, Xs), io:format("~p:~p " ++ Str, [?MODULE, ?LINE | Xs])).
+-define(info(X,Y), error_logger:info_msg("~p:~p: " X,
+                                         [?MODULE, ?LINE | Y])).
+
+-define(error(X,Y), error_logger:error_msg("~p:~p: " X,
+                                         [?MODULE, ?LINE | Y])).
+
 -define(elog(X,Y), error_logger:info_msg("*elog ~p:~p: " X,
                                          [?MODULE, ?LINE | Y])).
+-undef(dbg).
+%%-define(dbg(Str, Xs), io:format("~p:~p " ++ Str, [?MODULE, ?LINE | Xs])).
+-define(dbg(Str, Xs), ?elog(Str,Xs)).
 
 
 start_link(A) ->
@@ -560,8 +577,13 @@ clear_ets_complete(SC) ->
              SC
     end.
 
+%% This is the main acceptor loop for a server/IP
+%% - provide a loop break to allow code change to take effect
 
 gserv_loop(GS, Ready, Rnum, Last) ->
+   ?MODULE:gserv_loop_0(GS, Ready, Rnum, Last).
+
+gserv_loop_0(GS, Ready, Rnum, Last) ->
     receive
         {From , status} ->
             From ! {self(), GS},
@@ -1272,64 +1294,107 @@ not_implemented(CliSock, Req, Head) ->
     end.
 
 'PUT'(CliSock, Req, Head) ->
-    ?Debug("PUT Req=~p~n H=~p~n", [?format_record(Req, http_request),
-                                   ?format_record(Head, headers)]),
+%    ?xinfo("PUT Req=~p~n H=~p~n", [?format_record(Req, http_request),
+%                                   ?format_record(Head, headers)]),
     try
 	EmptyBin = << >>,
 	SC = get(sc),
-	?dbg("Starting PUT\n", []),
+	?xinfo("Starting PUT\n", []),
 	ARG = make_preliminary_arg(CliSock, Head, Req, EmptyBin),
-	?dbg("Dispatch on path\n", []),
+	?xinfo("Dispatch on path\n", []),
 	case Req#http_request.path of
 	    {abs_path,RawPath} ->
-		?dbg("Decode abspath ~p\n", [RawPath]),
+		?xinfo("Decode abspath ~p\n", [RawPath]),
+		%% Get if dav or bak (this can be stubbed for general yaws)
+		%% Segs = string:tokens(RawPath, "/"),
+		%% case Segs of
+		%% [ "dav",_User | Xs ] ->
+		%% Vol="dav";
+		%% [ "bak", _User | Xs ] ->
+		%% Vol="bak"
+		%% end,
+		Vol = "none",
 		case (catch yaws_api:url_decode_q_split(RawPath)) of
 		    {'EXIT', Rsn} ->
-			?dbg("Bad URL: ~p\n", [RawPath]),
+			?xerror("Bad URL: ~p\n", [RawPath]),
 			deliver_500(CliSock, Req);
 		    {DecPath,QueryPart} ->
-			?dbg("Auth ~p with auth header ~p\n",
-			     [DecPath, (ARG#arg.headers)#headers.authorization]),
+			?xinfo("ARG: ~p~nDecPath: ~p~n",[ARG, DecPath]),
 			case is_auth(ARG, DecPath,
 				     ARG#arg.headers,
 				     SC#sconf.authdirs) of
-			    {true, User} ->
-				?dbg("Auth OK, user = ~p\n",[User]),
-				ARG2 = set_auth_user(ARG, User),
-				ARG3 = apply(SC#sconf.arg_rewrite_mod, 
-					     arg_rewrite, [ARG2]),
-				yaws_upload:body(ARG3);
-			    true ->
-				?dbg("Auth OK\n",[]),
+			%%  {true, User} ->
+			%%  ?dbg("Auth OK, user = ~p\n",[User]),
+		        %%	ARG2 = set_auth_user(ARG, User),
+			%%	?xinfo("Auth OK, User:~p~n invoking fs_rewrite\n",[User]),
+			%%	ARG3 = apply(SC#sconf.arg_rewrite_mod, 
+			%%		     arg_rewrite, [ARG2]),
+		        %%	yaws_upload:body(ARG3);
+			    {true,PrevUsage} ->
+				%% ?xinfo("Auth OK, invoking fs_rewrite\n",[]),
 				ARG2 = apply(SC#sconf.arg_rewrite_mod, 
 					     arg_rewrite, [ARG]),
-				yaws_upload:body(ARG2);
-			    false -> 
-				?dbg("Auth failed, 401\n", []),
-				%% get the realm
+				yaws_upload:body(ARG2,PrevUsage,Vol);
+			    {false, StatusCode, Realm} -> 
 				%% Auth=Head#headers.authorization,
-				%% {_User,_Password,Realm}=Auth,
-				?dbg("UNFINISHED - realm set by default\n", []),
-				Realm = "DAV",
+				%% {_User,_Password,Realm}=Auth
+				%% ?xinfo("Fail, Status: ~p~nRealm: ~p~n",[StatusCode,Realm]),
+				%%Realm = get_realm(Head),
+				ARG2 = apply(SC#sconf.arg_rewrite_mod,
+					     arg_rewrite, [ARG]),
+				?xinfo("apply done~n",[]),
+				yaws_upload:body_discard(ARG2),
+				?xinfo("body done~n",[]),
+				case StatusCode of
+				    <<"401">> ->
+					deliver_xxx_comp(CliSock, Req, Realm, 401, "401 Unauthorized");
+				    <<"403">> ->
+					deliver_xxx_comp(CliSock, Req, Realm, 403, "403 Forbidden");
+				     <<"500">> ->
+					deliver_xxx_comp(CliSock, Req, Realm, 500, "500 Internal Server Error");
+				    <<"507">> ->
+					deliver_xxx_comp(CliSock, Req, Realm, 507, "507 Insufficient Storage");
+				    <<"509">> ->
+					deliver_xxx_comp(CliSock, Req, Realm, 509, "509 Bandwidth Limit Exceeded");
+				    X ->
+					deliver_xxx_comp(CliSock, Req, Realm, 401, io_lib:format("401 (Unknown status code ~p: deliver 401)", [X]))
+				end;
+			    {false,Realm} ->
+				?xinfo("Auth failed, 401\nRealm: ~p~n",[Realm]),
+				%%Realm = get_realm(Head),
+				ARG2 = apply(SC#sconf.arg_rewrite_mod,
+					     arg_rewrite, [ARG]),
+				?xinfo("apply done~n",[]),
+				yaws_upload:body_discard(ARG2),
+				?xinfo("body done~n",[]),
 				deliver_401(CliSock, Req, Realm)
 			end
 		end;
 	    OtherPath ->
-		?dbg("PUT: Unable to handle path ~p\n", [OtherPath]),
+		%% error_logger:error_report("PUT: Unable to handle path ~p\n", [OtherPath]),
+		?xerror("PUT: Unable to handle path ~p\n", [OtherPath]),
+		?xinfo("PUT: Unable to handle path ~p\n", [OtherPath]),
+		%%?dbg("PUT: Unable to handle path ~p\n", [OtherPath]),
 		deliver_500(CliSock, Req)
 	end
     catch
 	Ty:Exn ->
 	    deliver_internal_exception(CliSock, Req, Ty, Exn)
-    end.
+    end,
+    done.
+
+get_realm(#headers{authorization = {_User, _Pwd, Realm}}) ->
+    Realm;
+get_realm(_) ->
+    ?xinfo("Default realm: ~s\n", [?default_realm]),
+    ?default_realm.
 
 deliver_internal_exception(CliSock, Req, Ty, Exn) ->
     Path = Req#http_request.path,
-    ?dbg("PUT ~p ~p ~p: deliver 500", [Path, Ty, Exn]),
+    ?xerror("PUT ~p ~p ~w: deliver 500\nReq: ~p", [Path, Ty, Exn, Req]),
     deliver_500(CliSock, Req).
     
-'DELETE'(CliSock, Req, Head) ->
-    no_body_method(CliSock, Req, Head).
+'DELETE'(CliSock, Req, Head) -> no_body_method(CliSock, Req, Head).
 
 %%%
 %%% WebDav specifics: PROPFIND, MKCOL,....
@@ -1664,7 +1729,7 @@ set_auth_user(ARG, User) ->
     ARG#arg{headers = H2}.
 
 is_auth(_ARG, Req_dir, _H, [] ) -> 
-    ?dbg("No auth for ~p\n", [Req_dir]),
+    %% ?dbg("No auth for ~p\n", [Req_dir]),
     true;
 is_auth(ARG, Req_dir,H,[{Auth_dir, 
                          Auth=#auth{realm=Realm, users=Users, 
@@ -1683,10 +1748,13 @@ is_auth(ARG, Req_dir,H,[{Auth_dir,
                     {true, User};
                 true ->
                     true;
-                {false, Realm} ->
-                    maybe_auth_log({401, Realm}, ARG),
-                    {false, Realm};
-                _ ->
+		%% Unfinished Realm-name
+                {false, StatusCode, RealmOut} ->
+		    ?xinfo("maybe_auth_log: ~p~n",[RealmOut]),
+                    maybe_auth_log({401, RealmOut}, ARG),
+                    {false, StatusCode, RealmOut};
+                Ret ->
+		    ?xinfo("Got: ~p from json_ibrowse~n",[Ret]),
                     maybe_auth_log(403, ARG),
                     false
             end;
@@ -2154,6 +2222,22 @@ deliver_401(CliSock, _Req, Realm) ->
     B = list_to_binary("<html> <h1> 401 authentication needed  "
                        "</h1></html>"),
     H = #outh{status = 401,
+              doclose = true,
+              chunked = false,
+              server = yaws:make_server_header(),
+              connection = yaws:make_connection_close_header(true),
+              content_length = yaws:make_content_length_header(size(B)),
+              www_authenticate = yaws:make_www_authenticate_header(Realm),
+              contlen = size(B),
+              content_type = yaws:make_content_type_header("text/html")},
+    put(outh, H),
+    accumulate_content(B),
+    deliver_accumulated(CliSock),
+    done.
+
+deliver_xxx_comp(CliSock, _Req, Realm, Code, Msg) ->
+    B = list_to_binary("<html> <h1> " ++ Msg ++ " </h1></html>"),
+    H = #outh{status = Code,
               doclose = true,
               chunked = false,
               server = yaws:make_server_header(),
