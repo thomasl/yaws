@@ -518,9 +518,9 @@ code_to_phrase(501) -> "Not Implemented";
 code_to_phrase(502) -> "Bad Gateway";
 code_to_phrase(503) -> "Service Unavailable";
 code_to_phrase(504) -> "Gateway Timeout";
-code_to_phrase(505) -> "HTTP Version Not Supported".
-
-
+code_to_phrase(505) -> "HTTP Version Not Supported";
+code_to_phrase(507) -> "Insufficient Storage";
+code_to_phrase(509) -> "Bandwidth Limit Exceeded".
 
 %%
 %% server side include
